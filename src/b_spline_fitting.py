@@ -68,7 +68,8 @@ def fit_bspline(x, y, knots, degree, lmbda):
     return w
 
 def x_fit_bspline(networks, lmbda=1e4, number_of_knots=9, k=3):
-    """Fits x data with linear sum of B-spline basis functions as: x(t) = SUM(w*B_spl(k, ))
+    """Fits x data with linear sum of B-spline basis functions as: x(t) = SUM(w*B_spl(k, knots, networks, lmbda)) in which 
+    knots are uniformly distributed, networks are the control points, k is the degree of the B-spline, and lmbda is the regularization constant.
 
     Args:
         networks (float[][]): 2D matrix of time point (row = time point) and normalized network gene expression (column = network)  (as described at https://www.synapse.org/#!Synapse:syn3049712/wiki/74633)
@@ -91,9 +92,44 @@ def x_fit_bspline(networks, lmbda=1e4, number_of_knots=9, k=3):
 
     return output
 
+def get_bspline_vector(networks, number_of_knots, k):
+    """Generates 2 vectors that contain the basis b-spline function and the derivative of the b-spline basis function, respectively. They each have length
+    D (number of basis functions) and every entry in a vector thus contains the i'th basis function of weighted sum that the SciPy BSpline normally returns. 
+    Individual Bspline basis functions are non-zero on certain domains described by the knots of the Bspline (https://pages.mtu.edu/~shene/COURSES/cs3621/NOTES/spline/B-spline/bspline-basis.html)
+    More specifically, the i'th Bspline basis function is non zero on the interval [t_j, t_{j+k+1}) where t_j describes the j'th knot and k describes the degree of
+    the basis function.
 
+    Args:
+        networks (float[]): gene expression data that represent the anchor points 
+        number_of_knots (int): number of knots to be used --> uniform knot distribution is used 
+        k (int): degree of B-spline basis functions
 
+    Returns:
+        ([Bspline()], [Bspline().derivative()]): B-spline basis functions, and derivative functions
+    """
 
+    bspl_vec = []
+    bspl_der_vec = []
+
+    x = networks[:,0]
+    knots = np.linspace(min(x), max(x), number_of_knots)
+    D = number_of_knots - k - 1
+    bspl = BSpline(t=knots, k=k, c=[1 for i in range(D)])
+    bspl_derivative = bspl.derivative() # first order derivative
+    non_zero_intervals_basis_functions = [[knots[i] for i in range(j, j+k+1+1)] for j in range(D)] # non zero interval for basis function j is [t_j, t_{j+k+1}) but since range function excludes the last value you add +1
+
+    for i in range(len(non_zero_intervals_basis_functions)):
+        bspl_vec.append(bspl.basis_element(non_zero_intervals_basis_functions[i]))
+        bspl_der_vec.append(bspl_derivative.basis_element(non_zero_intervals_basis_functions[i]))
+    
+    return bspl_vec, bspl_der_vec
+
+def b_vec(t, bspl_vec, bspl_derivative_vec, lmbda_PROT):
+    phi_t = np.array([bspl_vec[i](t) for i in range(len(bspl_vec))])
+    phi_der_t = np.array([bspl_derivative_vec[i](t) for i in range(len(bspl_derivative_vec))])
+    b = lmbda_PROT*phi_t + phi_der_t
+
+    return b
 
 ### SCIPY fitting ###
 
