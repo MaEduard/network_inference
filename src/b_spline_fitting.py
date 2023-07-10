@@ -97,7 +97,7 @@ def get_bspline_vector(networks, number_of_knots, k):
     D (number of basis functions) and every entry in a vector thus contains the i'th basis function of weighted sum that the SciPy BSpline normally returns. 
     Individual Bspline basis functions are non-zero on certain domains described by the knots of the Bspline (https://pages.mtu.edu/~shene/COURSES/cs3621/NOTES/spline/B-spline/bspline-basis.html)
     More specifically, the i'th Bspline basis function is non zero on the interval [t_j, t_{j+k+1}) where t_j describes the j'th knot and k describes the degree of
-    the basis function.
+    the basis function. Of note, we do not actually use the gene expression data itself to construct these B-spline functions, rather the time points given in the `networks` matrix.
 
     Args:
         networks (float[]): gene expression data that represent the anchor points 
