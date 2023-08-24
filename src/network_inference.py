@@ -1,4 +1,3 @@
-import matplotlib.pyplot as plt
 import numpy as np
 from read_data import *
 from scipy.interpolate import BSpline
@@ -6,9 +5,7 @@ from b_spline_fitting import x_fit_bspline, fit_bspline_protein_expression
 from plotting import time_vs_expression
 from itertools import chain, combinations
 from P3_fitting import P3
-from sklearn.preprocessing import normalize
-import pandas as pd
-
+import os
 
 class NetworkInference():
 
@@ -65,9 +62,8 @@ class NetworkInference():
     def number_of_genes(self):
         return self._number_of_genes
     
-    def _microRNA_expression(cls, t, microRNA_T):
-        """Finds time interval, described by its upperbound, to which t belongs to generate all microRNAs expressed up till t. 
-
+    def _interval_detection(cls, t, intervals):
+        """Finds time interval, described by its upperbound, to which t belongs.
         Args:
             t (float): time point
             T (float[]): list of time point intervals
@@ -75,9 +71,9 @@ class NetworkInference():
         Returns:
             float: time point interval to which t belongs
         """
-        idx = microRNA_T[microRNA_T > t]
+        idx = intervals[intervals > t]
         if len(idx) == 0:
-            return microRNA_T[len(microRNA_T)-1]
+            return intervals[len(intervals)-1]
         return idx[0]
     
 
@@ -100,22 +96,25 @@ class NetworkInference():
     
     def infer(self, show_plot=False):
         
-        # P1
+        ### P1 ###
         TT = np.linspace(min(self.T), max(self.T), 1000) # time points for plotting
-        x_fit = x_fit_bspline(self.T, self.rna_expression, self.knots, self.lmbda, self.k) # also returns fitted on time data points (first column) but can be ignored to make indexing more intuitive
-        t_intervals = np.linspace(0, max(self.T), self.R + 1) # is it best to do this + 1? Otherwise you 1 interval short according to the paper
+        x_fit = x_fit_bspline(self.T, self.rna_expression, self.knots, self.lmbda, self.k) # solving minimization problem described by P1
+        t_intervals = np.linspace(0, max(self.T), self.R + 1) # create interval boundaries 
         t_interval_size = t_intervals[1]
 
         # G_t & M_t definition as in the paper 
-        G_t = {i: set() for i in t_intervals[1::]} # The set of all indices that correspond to protein encoding genes that were detected having changed gene expression. Start with interval [0,x) which is indicated as key x. Then interval [x, 2*x) etc.
-        M_t = {i: set() for i in t_intervals[1::]} # The set of all indices that correspond to miRNA-encoding genes that were detected having changed gene expression. Start with interval [0,x) which is indicated as key x. Then interval [x, 2*x) etc.
+        G_t = {i: set() for i in t_intervals[1::]} # The set of all indices that correspond to protein encoding genes that were detected having changed gene expression significantly. Start with interval [0,x) which is indicated as key x. Then interval [x, 2*x) etc.
+        M_t = {i: set() for i in t_intervals[1::]} # The set of all indices that correspond to miRNA-encoding genes that were detected having changed gene expression significantly. Start with interval [0,x) which is indicated as key x. Then interval [x, 2*x) etc.
         not_detected = [i for i in range(self.number_of_genes)] # list of non detected genes
 
-        # detect per interval whether a gene is influenced by perturbed gene. If difference in gene expresssion between beginning (t-t_int) and end (t) of interval > T, add gene to set of genes being pertured from time point 
-        for j, t in enumerate(t_intervals[1:len(t_intervals)]):
+        # detection of out-of-steady-state genes, creating G_t (and M_t) as described in section 3.2
+        for j, t in enumerate(t_intervals[0:len(t_intervals)-1]):
             to_be_removed = []
             for gene_i in not_detected:
-                if abs(x_fit[gene_i](t-t_interval_size) - x_fit[gene_i](t)) > self.detection_threshold:
+                t_interval_time_points = np.linspace(t, t+t_interval_size, 1000)
+                min_interval = min(x_fit[gene_i](t_interval_time_points))
+                max_interval = max(x_fit[gene_i](t_interval_time_points))
+                if (abs(min_interval - x_fit[gene_i](0)) > self.detection_threshold) or (abs(max_interval - x_fit[gene_i](0)) > self.detection_threshold):
                     to_be_removed.append(gene_i)
                     for tt in t_intervals[j+1:len(t_intervals)]:
                         G_t[tt].add(gene_i) # ADAPT HERE TO DISTINGUISH BETWEEN M_t and G_t. If gene is miRNA ecoding gene, M_t[t+1].add(i) else G_t[t+1].add(i)
@@ -127,32 +126,35 @@ class NetworkInference():
         if show_plot:
             time_vs_expression(self.T, TT, x_fit, self.number_of_genes, self.rna_expression, knots, lmbda, k)
 
-        # P2
+        ### P2 ###
         protein_degradation_rate = np.array([0.5 for _ in range(self.number_of_genes)]) # make all 1 (simplification) 
-        # protein_translation_rate = np.array([1 for _ in range(self.number_of_genes)]) # make all 1 (simplification)
-        protein_translation_rate = np.array([1,2,1])
+        protein_translation_rate = np.array([1,2,1]) # taken from experiment 4.1
 
-        alpha_i = np.zeros((self.number_of_genes, self.D)) # size = (number of genes, number_of_basis_functions)
+        alpha_i = np.zeros((self.number_of_genes, self.D)) # weights for the B-spline basis functions to create the B-spline curve
 
         for g in range(self.number_of_genes):
             x_i = x_fit[g](self.T)
-            alpha_i[g, :] = fit_bspline_protein_expression(protein_translation_rate[g], protein_degradation_rate[g], self.T, self.knots, self.k, self.D, x_i)
+            alpha_i[g, :] = fit_bspline_protein_expression(protein_translation_rate[g], protein_degradation_rate[g], self.T, self.knots, self.k, self.D, x_i) # P2
         if show_plot:
-            time_vs_expression(self.T, TT, x_fit, self.number_of_genes, self.rna_expression, self.knots, self.lmbda, self.k, False, alpha_i)
+            time_vs_expression(self.T, TT, x_fit, self.number_of_genes, self.rna_expression, self.knots, self.lmbda, self.k, False, alpha_i) # plotting protein expression
 
-        # P3
-        N_t_L = len(self._powerSet(list(G_t.values())[-1])) # largest set of regulators (out of steady-state genes) found. I.e. N(t_L) in the paper.
-        print(G_t)
+        ### P3 ###
+        all_possible_regulators = self._powerSet(list(G_t.values())[-1])
+        regulator_idx = {}
+        for idx, regs in enumerate(all_possible_regulators):
+            regulator_idx[regs] = idx # make sure indexing for a (pair of) regulator(s) is consistent for different sizes of G(t)
+
+        N_t_L = len(all_possible_regulators) # largest set of regulators (out of steady-state genes) found. I.e. N(t_L) in the paper. 
         p_vector = np.zeros((self.number_of_genes, len(self.T), 2*N_t_L)) # matrix holding p vector as described in equation 11 
-        for g in range(self.number_of_genes):
-            for t_idx, t in enumerate(self.T):
-                interval = self._microRNA_expression(t, np.array(list(G_t.keys()))) # finds interval to which time point t belongs 
-                protein_regulators = self._powerSet(G_t[interval]) # point of optimalization is possible
-                for reg_idx, regulators in enumerate(protein_regulators): 
+        for g in range(self.number_of_genes): 
+            for t_idx, t in enumerate(self.T): 
+                interval = self._interval_detection(t, np.array(list(G_t.keys()))) 
+                protein_regulators_possibilities = self._powerSet(G_t[interval]) # point of optimalization is possible
+                for regulators in protein_regulators_possibilities: 
                     y_k = 1 
                     for regulator in regulators: 
                         y_k *=  BSpline(knots, alpha_i[regulator], k=self.k)(t) 
-                    p_vector[g, t_idx, reg_idx] = y_k 
+                    p_vector[g, t_idx, regulator_idx[regulators]] = y_k 
                     if y_k < 0: 
                         print(f"t = {t}, regulators = {regulators}") 
                         print(BSpline(knots, alpha_i[regulator], k=self.k)(t))
@@ -160,39 +162,38 @@ class NetworkInference():
 
         # Multiply with constant C(t) = lambda_i^RNA*x_i(t) + dx/dt(t)
         lmbda_RNA = [0.1, 0.1, 0.1] # taken from the paper
-        delta_t = self.T[1] - self.T[0]
+        delta_t = self.T[1] - self.T[0] # paper describes two ways to take the derivative.
         for g in range(self.number_of_genes):
             for t_idx, t in enumerate(self.T):
-                c_t = lmbda_RNA[g] * x_fit[g](t) + ((x_fit[g](t + delta_t) - x_fit[g](t))/delta_t)
-                # c_t = lmbda_RNA[g] * x_fit[g](t) + x_fit[g].derivative()(t)
+                # c_t = lmbda_RNA[g] * x_fit[g](t) + ((x_fit[g](t + delta_t) - x_fit[g](t))/delta_t)
+                c_t = lmbda_RNA[g] * x_fit[g](t) + x_fit[g].derivative()(t)
                 c_t_p = p_vector[g, t_idx, :N_t_L] * -c_t 
                 p_vector[g, t_idx, N_t_L:] = c_t_p
 
-        df = pd.DataFrame(p_vector[2])
-        # df.to_clipboard(index=False,header=False)
-
-        print(G_t)
-
-        # coef1 = P3(p_vector[0])
-        # coef2 = P3(p_vector[1])
+        print("gene 1 [a b]")
+        coef1 = P3(p_vector[0]) # outputs the a and b vector concatenated.
+        print("gene 2 [a b]")
+        coef2 = P3(p_vector[1])
+        print("gene 3 [a b]")
         coef3 = P3(p_vector[2])
 
 if __name__ == "__main__":
-    # Load data DREAM CHALLENGE
 
+    ### Load data DREAM CHALLENGE ###
     # path_name = os.p  ath.join("data", "DREAM4", "DREAM4_InSilico_Size10", "insilico_size10_2" ,"insilico_size10_2_timeseries.tsv")
     # n1, n2, n3, n4, n5 = read_dream_time_series(path_name, 21) # returns np.arrays
     # T = n1[:,0]
     # rna_expression = n1[:, 1::]
     
-    # Load data EXPERIMENT 4.1
+    ### Load data EXPERIMENT 4.1 ###
     path_name = os.path.join("data", "experiment_4_1", "experiment_4_1.tsv")
     data = read_experiment_41(path_name)
-    T = data[:,0]
-    rna_expression = data[:, 1::]
+    T = data[:,0] # first columns contains time points, rest is gene expression
+    rna_expression = data[:, 1::] 
+
+    ### try different normalization techniques ###
     rna_expression_normalized_per_gene_norm = np.empty_like(rna_expression)
     for column in range(len(rna_expression[0])):
-        # rna_expression_normalized_per_gene[:, column] = (rna_expression[:, column] - min(rna_expression[:, column])) / (max(rna_expression[:, column]) - min(rna_expression[:, column]))
         rna_expression_normalized_per_gene_norm[:, column] = rna_expression[:, column] / np.linalg.norm(rna_expression[:, column], ord=2)
 
     rna_expression_normalized_all_genes = np.empty_like(rna_expression)
@@ -207,16 +208,13 @@ if __name__ == "__main__":
         max_per_gene = np.max(rna_expression[:, column])
         rna_expression_normalized_per_gene[:, column] = (rna_expression[:, column] - min_per_gene) / (max_per_gene - min_per_gene)
 
+    ### hyper parameters ###
     lmbda = 15
     k = 3 # degree of B-spline  
-    number_of_knots = 10
-    R = 6
-    detection_threshold = 0.02
+    R = 7
+    detection_threshold = 0.05
     show_plot = True
-    # knots = np.linspace(min(T), max(T), number_of_knots)
     knots = np.array([0, 2, 4, 5, 10, 15, 20, 30, 50])
-    knots = np.linspace(0,50, 10)
-    # clamped_knots = np.array((k+1)*[min(T)] + np.floor(np.linspace(T[0], T[-1], number_of_knots - 2*k)).tolist() + (k+1)*[max(T)])
-    # print(clamped_knots)
-    network = NetworkInference(T, rna_expression_normalized_all_genes, lmbda, R, knots, k, detection_threshold)
+    knots = np.linspace(0, 50, 10)
+    network = NetworkInference(T, rna_expression, lmbda, R, knots, k, detection_threshold)
     network.infer(show_plot)
