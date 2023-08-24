@@ -3,7 +3,7 @@ import numpy as np
 from read_data import *
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
-from b_spline_fitting import x_fit_bspline, get_bspline_vector, b_vec
+from b_spline_fitting import x_fit_bspline, get_bspline_vector, b_vec, y_i
 import cvxpy as cp
 
 def microRNA_expression(t, T):
@@ -32,23 +32,32 @@ def protein_expression_estimation(A, D, max_card):
     Returns:
         float[], float[]: np.arrays z and alpha
     """
-    z = cp.Variable(max_card, nonneg=True)
+    
     alpha = cp.Variable(D)  
-
-    # P2
-    objective = cp.Minimize(cp.norm2(A @ cp.hstack((-1, z, alpha))) + cp.norm1(z)) # finish full expression
-
-    # Constraints
     constraints = []
-    for t in range(len(A)):
-        constraints.append(A[t, 1:max_card+1] @ z <= A[t, 0])
+
+    if max_card != 0:
+        z = cp.Variable(max_card, nonneg=True)
+        # P2
+        # objective = cp.Minimize(cp.norm2(A @ cp.hstack((-1, z, alpha))) + cp.norm1(z)) # finish full expression
+        objective = cp.Minimize(cp.norm2(A @ cp.hstack((-1, z, alpha)))) # finish full expression
+    
+        # Constraints
+        for t in range(len(A)):
+            constraints.append(A[t, 1:max_card+1] @ z <= A[t, 0])
+    else:
+        # P2
+        objective = cp.Minimize(cp.norm2(A @ cp.hstack((-1, alpha)))) # finish full expression
 
     problem = cp.Problem(objective, constraints)
 
     problem.solve()
 
     # Extract the optimal z and c values
-    z_optimal = z.value
+    if max_card != 0:
+        z_optimal = z.value
+    else:
+        z_optimal = None
     alpha_optimal = alpha.value
 
     return z_optimal, alpha_optimal
@@ -126,42 +135,67 @@ def main(n1, lmbda, k, number_of_knots, show_plot=False):
 
     # middle vector in A matrix (equation 10)
 
-    # TEST CODE
-    for i in (600, 800, 1000):
-        if i == 600:
-            M_t[i] = set([2,4])
-        elif i > 600:
-            M_t[i] = set([2,4, 6])
+    # # TEST CODE
+    # for i in (600, 800, 1000):
+    #     if i == 600:
+    #         M_t[i] = set([2,4])
+    #     elif i > 600:
+    #         M_t[i] = set([2,4, 6])
 
     # print(M_t)
 
-    max_length_M_t = len(M_t[list(M_t.keys())[-1]]) # M_t(t_L) in the paper
-    middle_vec = np.zeros((len(n1[0,1::]), len(x), max_length_M_t))
-    
-    for gene in range(1, len(n1[0,:])):
+    alpha_i = np.zeros((len(n1[0,1::]), D)) # size = (number of genes, number_of_basis_functions)
+
+    for g in range(len(n1[0,1::])):
+        max_length_M_t = len(M_t[list(M_t.keys())[-1]]) # M_t(t_L) in the paper
+        middle_vec = np.zeros((len(x), max_length_M_t))
+        
         for t_idx, t in enumerate(x):
             time_stamp = microRNA_expression(t, np.array(list(M_t.keys()))) # M_t.keys() are the time intervals
             microRNA = []
             for micro_gene in M_t[time_stamp]:
-                microRNA.append(n1[t_idx, micro_gene]*n1[t_idx, gene]) # is the micro_gene index correct? # MULTIPLY WITH GENE EXPRESSION OF GENE X_i
+                microRNA.append(n1[t_idx, micro_gene]*n1[t_idx, g + 1]) # is the micro_gene index correct? if M_t detects gene 0, then this indexing is incorrect since the 0th column represents time # MULTIPLY WITH GENE EXPRESSION OF GENE X_i
             
             if len(microRNA) < max_length_M_t:
                 microRNA = microRNA + [0 for _ in range(max_length_M_t - len(microRNA))]
-            middle_vec[gene-1, t_idx] = microRNA
+            middle_vec[t_idx, :] = microRNA
 
-    # A matrix (equation 10) (for all genes) 
-    A = np.zeros((len(n1[0,1::]), len(x), max_length_M_t + D + 1)) # (number of genes, number of time points, max_length_M_t + D + 1). Of note, per network, you always have the same number for max_length_M_t
+        # A matrix (equation 10) (for all genes) 
+        A = np.zeros((len(x), max_length_M_t + D + 1)) # (number of time points, max_length_M_t + D + 1). Of note, per network, you always have the same number for max_length_M_t
 
-    for gene in range(1, len(n1[0,:])):
-        x_i = n1[:, gene]
-        A[gene - 1, :, 0] = x_i.T
+        x_i = n1[:, g + 1]
+        A[:, 0] = x_i.T
                 
-        for t in range(len(x)):
-            A[gene - 1, t, 1::] = np.concatenate((middle_vec[gene -1, t], b[gene - 1, t, :]))    
-    
-    z, alpha = protein_expression_estimation(A[0], D, max_length_M_t)
-    print(z)
-    print(alpha)
+        for t_idx in range(len(x)): 
+            A[t_idx, 1::] = np.concatenate((middle_vec[t_idx], b[g, t_idx, :]))    
+        
+        z, alpha = protein_expression_estimation(A, D, max_length_M_t)
+        alpha_i[g, :] = alpha
+
+    print(alpha_i)  
+
+    if show_plot:
+        # plotting settings
+        colors = ['b', 'r', 'lime', 'magenta', 'black', 'sienna', 'darkolivegreen', 'turquoise', 'hotpink', 'goldenrod']
+        markers = ["o", "d", "v", "s", "*", "^", "o", "d", "v", "s", "*", "^"]
+
+        for i in range(len(n1[0, 1::])):
+            prot_expr = []
+            prot_expr2 = []
+            for t in x:
+                prot_expr.append(y_i(t, bspl_vec, alpha_i[i]))
+                prot_expr2.append(BSpline(np.linspace(0, 1000, number_of_knots), alpha_i[i], k=3)(t))
+            plt.plot(x, prot_expr, label=f"gene {i}", color=colors[i % len(colors)], linewidth=1.0)
+
+        # plotting
+        plt.title(f"Protein expression of insilico_size10_2 for k = {k}, knots = {number_of_knots}")
+        plt.ylabel("Expresssion levels")
+        plt.xlabel("Time")
+        plt.ylim([0, 1.1])
+        plt.legend(loc='upper right', fancybox = True, shadow=True)
+        plt.grid()
+        plt.show()
+
 
 if __name__ == "__main__":
     # Load data
@@ -172,5 +206,5 @@ if __name__ == "__main__":
     lmbda = 1e4
     k = 3 # degree of B-spline
     number_of_knots = 8
-    show_plot = False
+    show_plot = True
     main(n1, lmbda, k, number_of_knots, show_plot)
